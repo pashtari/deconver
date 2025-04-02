@@ -1,11 +1,11 @@
 <div align="center">
 <img src="https://drive.google.com/uc?export=view&id=1hqIEo_SsjTLFgoA2Mv8ODDrdEUkF3awv" alt="Deconver Logo" height="150"></img>
+<br><br>
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange.svg)](https://pytorch.org/)
 [![arXiv](https://img.shields.io/badge/arXiv-2504.00302-b31b1b.svg)](https://arxiv.org/abs/2504.00302)
-
 </div>
 
 This repository is the official implementation of ["Deconver: A Deconvolutional Network for Medical Image Segmentation"](https://arxiv.org/abs/2504.00302).
@@ -44,6 +44,8 @@ pip install git+https://github.com/pashtari/deconver.git
 ### 2D Segmentation: GlaS Example
 
 ```python
+import torch
+import torch.nn as nn
 from deconver import Deconver
 
 model = Deconver(
@@ -60,8 +62,8 @@ model = Deconver(
     ratio=4,                # source channel expansion ratio
 )
 
-x = torch.rand((1, 3, 256, 256))
-y = model(x) 
+x = torch.rand(1, 3, 256, 256)
+y = model(x)                # output logits
 ```
 
 ### 3D Segmentation: ISLES'22 Example
@@ -82,7 +84,7 @@ deconver = Deconver(
 )
 
 x = torch.rand(1, 2, 64, 64, 64)
-y = model(x)    # output logits
+y = model(x)
 ```
 
 

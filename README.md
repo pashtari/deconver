@@ -69,7 +69,7 @@ y = model(x)                # output logits
 ### 3D Segmentation: ISLES'22 Example
 
 ```python
-deconver = Deconver(
+model = Deconver(
     in_channels=2,
     out_channels=1,
     spatial_dims=3,

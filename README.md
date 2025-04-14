@@ -1,5 +1,5 @@
 <div align="center">
-<img src="https://drive.google.com/uc?export=view&id=1hqIEo_SsjTLFgoA2Mv8ODDrdEUkF3awv" alt="Deconver Logo" height="150"></img>
+<img src="https://www.dropbox.com/scl/fi/lzxwb33sjwi2nfmudme5z/logo.png?rlkey=lqvphiuirl7qak5d8hjyeky8j&st=k0cgmsuy&raw=1" alt="Deconver Logo" height="150"></img>
 <br><br>
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -14,7 +14,7 @@ This repository is the official implementation of ["Deconver: A Deconvolutional 
 
 **Deconver** is a segmentation architecture inspired by deconvolution techniques. We introduce a novel *mixer module* based on *nonnegative deconvolution (NDC)*, which effectively restores high-frequency details while suppressing artifacts. Built on a U-shaped backbone, Deconver replaces computationally expensive self-attention blocks with this mixer to efficiently capture special dependencies.
 
-![Graphical Abstract](https://drive.google.com/uc?export=view&id=1WhNf_Sbbe5BtfA2c1MMUU2-5KxPRYTAt)
+![Graphical Abstract](https://www.dropbox.com/scl/fi/fb28d3lfmxd0ptj2ez2am/graphical_abstract.png?rlkey=hjzn5i5pw7ciksz9e15j851zq&st=fj6gc5ic&raw=1)
 
 
 ## ✨ Key Features
@@ -69,7 +69,7 @@ y = model(x)                # output logits
 ### 3D Segmentation: ISLES'22 Example
 
 ```python
-deconver = Deconver(
+model = Deconver(
     in_channels=2,
     out_channels=1,
     spatial_dims=3,

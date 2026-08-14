@@ -1,3 +1,14 @@
+"""Verbatim copy of the original (pre-optimization) deconvolution implementation.
+
+This module is kept **only** as a numerical/performance reference for the tests in
+``tests/test_deconv_equivalence.py`` and the benchmarks in ``benchmarks/``.  It is
+intentionally *not* exported from :mod:`deconver.deconvolution`, so importing the
+package never pulls it in.
+
+Nothing in here should ever be modified: it defines the ground truth that the
+optimized implementation in :mod:`deconver.deconvolution.deconv` is validated against.
+"""
+
 from typing import Any, Optional, Sequence
 import math
 from functools import partial
@@ -6,18 +17,80 @@ from contextlib import nullcontext
 import torch
 from torch import Tensor
 from torch import nn
+from torch.func import vmap
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 
-from .operations import t, flip, conv, sconv, relative_error
-from .functional import deconv_update, fused_kernels_apply
 from ..layers.linear import Linear
 
 
-__all__ = ["Initializer", "Deconv", "NDC"]
+__all__ = ["ReferenceDeconv", "ReferenceInitializer"]
 
 
-class Initializer(nn.Module):
+CONV = {d: getattr(F, f"conv{d}d") for d in range(1, 4)}
+
+
+def conv(input: Tensor, weight: Tensor, groups: int = 1, **kwargs) -> Tensor:
+    batch_size = input.shape[0]
+    spatial_dims = input.ndim - 2
+
+    # Reshape input and weight for batch computation
+    input_reshaped = input.reshape(1, batch_size * input.shape[1], *input.shape[2:])
+    weight_reshaped = weight.reshape(
+        batch_size * weight.shape[1], weight.shape[2], *weight.shape[3:]
+    )
+
+    # Adjust groups for batch computation
+    groups = groups * batch_size
+
+    # Perform convolution
+    output = CONV[spatial_dims](input_reshaped, weight_reshaped, groups=groups, **kwargs)
+
+    # Reshape output back to batch form
+    output = output.reshape(batch_size, -1, *output.shape[2:])
+
+    return output
+
+
+@vmap
+def sconv(input1: Tensor, input2: Tensor, **kwargs) -> Tensor:
+    spatial_dims = input1.ndim - 1
+    input1 = input1.unsqueeze(1)
+    input2 = input2.unsqueeze(1)
+    output = CONV[spatial_dims](input1, input2, **kwargs)
+    return output
+
+
+def t(x: Tensor) -> Tensor:
+    return x.transpose(1, 2)
+
+
+def flip(h: Tensor) -> Tensor:
+    return torch.flip(h, dims=tuple(range(3 - h.ndim, 0)))
+
+
+def norm2(x: Tensor, w: Optional[Tensor] = None) -> Tensor:
+    y = x.flatten(1).square()
+
+    if w is not None:
+        w = w.flatten(1)
+        y *= w
+
+    return torch.sqrt(torch.sum(y, dim=1))
+
+
+def relative_error(
+    x: Tensor,
+    y: Tensor,
+    w: Optional[Tensor] = None,
+    eps: float = 1e-16,
+) -> Tensor:
+    numerator = norm2(x - y, w) + eps
+    denominator = norm2(x, w) + eps
+    return numerator / denominator
+
+
+class ReferenceInitializer(nn.Module):
     def __init__(
         self,
         channels: int,
@@ -45,22 +118,8 @@ class Initializer(nn.Module):
         return F.relu(s), F.relu(h)
 
 
-class Deconv(nn.Module):
-    """Deconvolution layer.
-
-    The layer fits a non-negative source ``s`` such that ``x ≈ conv(s, h)`` by running
-    multiplicative (Lee-Seung/ISRA) updates starting from a learned initialization.
-
-    Two execution paths produce the same result:
-
-    * a **fast path**, taken when the filter is the same for every sample of the batch
-      (``update_filter=False``), the convolutions are plain stride-1 same-padded ones with
-      odd kernels, and the filter geometry is one the fused kernels cover.  The per-sample
-      "batched" convolution then collapses into a single grouped convolution and the whole
-      update runs as one custom autograd node, which never materializes the numerator, the
-      denominator, or the rectified source;
-    * the **general path**, i.e. the original implementation, for everything else.
-    """
+class ReferenceDeconv(nn.Module):
+    """Deconvolution layer (original, unoptimized implementation)."""
 
     def __init__(
         self,
@@ -86,7 +145,7 @@ class Deconv(nn.Module):
             channels * ratio / self.groups if source_channels is None else source_channels
         )
         self.kernel_size = kernel_size
-        self.init = Initializer(
+        self.init = ReferenceInitializer(
             self.channels, self.source_channels, self.kernel_size, self.groups
         )
         self.update_source = update_source
@@ -101,87 +160,6 @@ class Deconv(nn.Module):
         padding = tuple(k // 2 for k in kernel_size)
         self.conv = partial(conv, padding=padding, **kwargs)
         self.sconv = partial(sconv, padding=padding, **kwargs)
-
-        # --- fast-path bookkeeping (no effect on the parameters or the state dict)
-        self.filter_channels = self.channels // self.groups
-        self._conv_kwargs = dict(kwargs)
-        # even kernels break both the adjoint identity and the shape arithmetic
-        self._odd_kernel = all(k % 2 == 1 for k in kernel_size)
-
-    # ------------------------------------------------------------------ fast path
-
-    def fast_path_applicable(self, x: Optional[Tensor] = None) -> bool:
-        """Whether the fused update reproduces this configuration exactly, and faster.
-
-        The fast path replaces the update as a whole, so it is declined whenever a subclass
-        has overridden any of the methods it would otherwise route through.  Configurations
-        the fused kernels do not cover keep running the general path: without them the
-        update would be built from the same convolutions the original already uses, and
-        cuDNN picks better algorithms for its batched form often enough that the rewrite is
-        not reliably ahead.
-        """
-        cls = type(self)
-        if not (
-            self._odd_kernel
-            and self.update_source
-            and not self.update_filter
-            and not self.verbose
-            and not self._conv_kwargs
-            and self.num_iters >= 1
-            and cls.update_s is Deconv.update_s
-            and cls.update is Deconv.update
-            and cls.iterative_update is Deconv.iterative_update
-            and type(self.init).forward is Initializer.forward
-        ):
-            return False
-        if x is None:
-            return True
-        try:
-            autocast = torch.is_autocast_enabled(x.device.type)
-        except TypeError:  # pragma: no cover - older torch signature
-            autocast = torch.is_autocast_enabled()
-        except RuntimeError:  # device types without an autocast key, e.g. "meta"
-            autocast = False
-        return (
-            x.dim() - 2 == len(self.kernel_size)
-            and not autocast
-            and fused_kernels_apply(
-                x, self.filter_channels, self.source_channels, self.kernel_size
-            )
-        )
-
-    def _fit_fast(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        """Iterate the source update with a batch-invariant filter."""
-        x = x.contiguous()
-        h = F.relu(self.init.h0)  # batch-invariant, unlike the expanded `h` of init()
-        # `s` enters the update pre-ReLU *and* pre-bias: the kernels rectify it and add the
-        # projection's bias while loading, so neither `relu(Linear(x))` nor the biased
-        # projection is ever materialized -- two fewer full-size passes over the largest
-        # tensor of the layer.
-        projection = self.init.linear.linear
-        s = F.conv1d(x.flatten(2), projection.weight, None)
-        s = s.view(x.shape[0], -1, *x.shape[2:])
-        bias = projection.bias
-        rectify = True
-        for it in range(1, self.num_iters + 1):
-            with self.context(it):
-                s = deconv_update(
-                    x,
-                    s,
-                    h,
-                    bias,
-                    groups=self.groups,
-                    m=self.filter_channels,
-                    sc=self.source_channels,
-                    eps=self.eps,
-                    relu_input=rectify,
-                )
-            rectify = False
-            bias = None  # later iterations start from an already biased, rectified source
-
-        return s, h
-
-    # ------------------------------------------------------------- general path
 
     def normalize_h(self, h: Tensor) -> Tensor:
         return (h + self.eps) / (
@@ -228,7 +206,9 @@ class Deconv(nn.Module):
 
         return s, h
 
-    def _fit_general(self, x: Tensor) -> tuple[Tensor, Tensor]:
+    def fit(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        # x: (B, C, ...)
+
         # Initialize source and filter tensors
         s, h = self.init(x)
 
@@ -247,18 +227,6 @@ class Deconv(nn.Module):
             h = self.merge_channels(h)
 
         return s, h
-
-    # ----------------------------------------------------------------- interface
-
-    def fit(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        # x: (B, C, ...)
-        if self.fast_path_applicable(x):
-            s, h = self._fit_fast(x)
-            # `fit` reports the filter in its batched form, as the general path does.
-            h = h.expand(x.shape[0], *h.shape).contiguous()
-            return s, h
-
-        return self._fit_general(x)
 
     def reconstruct(self, s: Tensor, h: Tensor) -> Tensor:
         # Split channels if grouping is enabled
@@ -285,11 +253,21 @@ class Deconv(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         # x: (B, C, ...)
-        if self.fast_path_applicable(x):
-            return self._fit_fast(x)[0]
 
-        return self._fit_general(x)[0]
+        # Initialize source and filter tensors
+        s, h = self.init(x)
 
+        # Split channels if grouping is enabled
+        if self.groups != 1:
+            x = self.split_channels(x)
+            s = self.split_channels(s)
+            h = self.split_channels(h)
 
-# Alias for convenience
-NDC = Deconv
+        # Perform iterative update on source and filter tensors
+        s, h = self.iterative_update(x, s, h)
+
+        # Merge channels back if they were split
+        if self.groups != 1:
+            s = self.merge_channels(s)
+
+        return s
